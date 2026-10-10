@@ -10,6 +10,8 @@ import streamlit as st
 from pypdf import PdfReader
 from docx import Document
 
+from ai_service import generate_plan
+
 
 # ============================================================
 # CONFIGURATION
@@ -402,22 +404,18 @@ def suggest_tasks(document_text):
     return tasks
 
 
-def generate_project_tasks(project_id):
-    project = get_project(project_id)
-    if not project:
-        return
-    suggestions = suggest_tasks(project["document_text"] or "")
-    with get_db() as conn:
-        existing = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", (project_id,)).fetchone()["n"]
-        if existing > 0:
-            return
-        for title, description in suggestions:
-            conn.execute(
-                "INSERT INTO tasks (project_id, title, description, status, created_at) VALUES (?, ?, ?, 'To do', ?)",
-                (project_id, title, description, datetime.utcnow().isoformat()),
-            )
-        conn.execute("UPDATE projects SET tasks_generated = 1 WHERE id = ?", (project_id,))
+def generate_project_tasks(document_text, project_id):
+    members = get_members(project_id)
+    member_names = [member["name"] for member in members]
 
+    result = generate_plan(
+        brief=document_text,
+        rubric="",
+        comments="",
+        members=member_names
+    )
+
+    return result
 
 # ============================================================
 # APP FLOW & UI
@@ -631,23 +629,101 @@ else:
                 if not document_text.strip():
                     st.warning("No readable text found in the file.")
                 else:
-                    with get_db() as conn:
-                        conn.execute("UPDATE projects SET document_text = ? WHERE id = ?", (document_text, selected_project_id))
+                    st.session_state[f"document_{selected_project_id}"] = document_text
                     st.success("Assignment document saved.")
                     st.rerun()
 
-        project = get_project(selected_project_id)
-        if project["document_text"]:
+        #Document upload and save assignment document code above
+        document_text = st.session_state.get(
+            f"document_{selected_project_id}", ""
+        )
+
+        if document_text:
             st.success("Assignment document loaded.")
+
             with st.expander("Preview document text"):
-                st.text(project["document_text"][:3000])
+                st.text(document_text[:3000])
 
-            if not project["tasks_generated"]:
-                if st.button("Generate AI Task Suggestions", type="primary", key=f"gen_tasks_{selected_project_id}"):
-                    generate_project_tasks(selected_project_id)
-                    st.success("Tasks generated successfully.")
-                    st.rerun()
+            if st.button(
+                "Generate AI Task Suggestions",
+                type="primary",
+                key=f"gen_tasks_{selected_project_id}"
+            ):
+                existing_tasks = get_tasks(selected_project_id)
 
+                if existing_tasks:
+                    st.warning(
+                        "This project already has tasks. Review the existing task board before generating more."
+                    )
+                else:
+                    with st.spinner("AI is generating tasks..."):
+                        try:
+                            result = generate_project_tasks(
+                                document_text,
+                                selected_project_id
+                            )
+
+                            st.session_state[
+                                f"ai_tasks_{selected_project_id}"
+                            ] = result
+
+                        except Exception as e:
+                            st.error(f"AI generation failed: {e}")
+
+        # Display AI-generated tasks for review
+        ai_key = f"ai_tasks_{selected_project_id}"
+
+        if ai_key in st.session_state:
+            result = st.session_state[ai_key]
+            tasks = result.get("tasks", [])
+
+            st.subheader("Review AI Task Suggestions")
+
+            for i, task in enumerate(tasks):
+                with st.expander(f"{i + 1}. {task.get('title', 'Untitled task')}"):
+                    st.write(task.get("description", ""))
+
+                    st.write("**Marking criterion:**", task.get("criterion", ""))
+                    st.write("**Suggested member:**", task.get("suggested_member", ""))
+                    st.write("**Estimated effort:**", task.get("estimated_effort", ""))
+
+                    if task.get("source_verified"):
+                        st.success("Source quote verified")
+                    else:
+                        st.warning("Source quote could not be verified")
+
+                    st.caption(task.get("source_quote", ""))
+
+            if tasks and st.button(
+                "Approve and Add Tasks",
+                type="primary",
+                key=f"approve_ai_{selected_project_id}"
+            ):
+                with get_db() as conn:
+                    for task in tasks:
+                        conn.execute(
+                            """
+                            INSERT INTO tasks
+                            (project_id, title, description, status, created_at)
+                            VALUES (?, ?, ?, 'To do', ?)
+                            """,
+                            (
+                                selected_project_id,
+                                task.get("title", "Untitled task"),
+                                task.get("description", ""),
+                                datetime.utcnow().isoformat()
+                            )
+                        )
+
+                    conn.execute(
+                        "UPDATE projects SET tasks_generated = 1 WHERE id = ?",
+                        (selected_project_id,)
+                    )
+
+                del st.session_state[ai_key]
+                st.success("Approved tasks added to the board!")
+                st.rerun()
+        
         st.divider()
         st.markdown("#### Collaborative Task Board")
 
