@@ -39,3 +39,5 @@ uvicorn==0.54.0
 websockets==17.2
 Werkzeug==3.1.9
 pymupdf
+pypdf
+python-docx

@@ -9,6 +9,8 @@ import pandas as pd
 import streamlit as st
 from pypdf import PdfReader
 from docx import Document
+from db import has_active_plan
+from payments import show_paywall
 
 
 # ============================================================
@@ -440,6 +442,13 @@ if "email" not in st.session_state:
 if "project_id" not in st.session_state:
     st.session_state["project_id"] = None
 
+if not st.session_state["email"] and st.query_params.get("email"):
+    returning = get_user(st.query_params["email"])
+    if returning:
+        st.session_state["name"] = returning["name"]
+        st.session_state["email"] = returning["email"]
+
+
 # --- SIGN IN / CREATE ACCOUNT AUTHENTICATION SCREEN ---
 if not st.session_state["name"] or not st.session_state["email"]:
     st.markdown("### Welcome to Task Manager")
@@ -494,6 +503,10 @@ if not st.session_state["name"] or not st.session_state["email"]:
 
 name = st.session_state["name"]
 email = st.session_state["email"]
+
+if not has_active_plan(email):
+    show_paywall(email)
+    st.stop()
 
 # --- MAIN WORKSPACE ---
 st.header("Workspace")
