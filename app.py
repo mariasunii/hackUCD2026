@@ -144,6 +144,23 @@ st.markdown(
         border: 1.5px solid #7C3AED !important;
     }
 
+    /* Force uploaded file pill / tag items to have a white background and black text */
+    [data-testid="stFileUploader"] [data-baseweb="tag"],
+    [data-testid="stFileUploader"] [data-testid="stUploadedFile"],
+    div[data-baseweb="tag"] {
+        background-color: #FFFFFF !important;
+        border: 1.5px solid #000000 !important;
+        border-radius: 8px !important;
+        color: #000000 !important;
+    }
+
+    [data-testid="stFileUploader"] [data-baseweb="tag"] *,
+    [data-testid="stFileUploader"] [data-testid="stUploadedFile"] *,
+    div[data-baseweb="tag"] * {
+        color: #000000 !important;
+        -webkit-text-fill-color: #000000 !important;
+    }
+
     div[data-testid="stTextInput"] input::placeholder,
     div[data-testid="stTextArea"] textarea::placeholder {
         color: #666666 !important;
@@ -342,7 +359,7 @@ def add_member(project_id, name, email):
 # DOCUMENT EXTRACTION & AI SUGGESTIONS
 # ============================================================
 
-def extract_document(uploaded_file):
+def extract_single_document(uploaded_file):
     filename = uploaded_file.name.lower()
     try:
         if filename.endswith(".txt"):
@@ -357,11 +374,18 @@ def extract_document(uploaded_file):
                 for row in table.rows:
                     paragraphs.append(" | ".join(cell.text for cell in row.cells))
             return "\n".join(paragraphs)
-        st.error("Upload a TXT, PDF, or DOCX file.")
         return ""
     except Exception as exc:
-        st.error(f"Could not read the document: {exc}")
-        return ""
+        return f"[Error reading {uploaded_file.name}: {exc}]"
+
+
+def extract_documents(uploaded_files):
+    texts = []
+    for f in uploaded_files:
+        text = extract_single_document(f)
+        if text.strip():
+            texts.append(f"--- File: {f.name} ---\n" + text)
+    return "\n\n".join(texts)
 
 
 def suggest_tasks(document_text):
@@ -582,7 +606,7 @@ else:
         st.caption(f"Invite Code: **{project['invite_code']}** · {member_count} member(s) joined")
 
         invite_url = "http://localhost:8501?" + urlencode({"invite": project["invite_code"]})
-        st.markdown("**Shareable Invite Link**")
+        st.markdown("**Shareable Invite Link (Click box to copy)**")
         
         st.components.v1.html(f"""
             <div onclick="copyLink()" style="
@@ -621,26 +645,26 @@ else:
             st.write(f"• **{member['name']}** ({member['email']})")
 
         st.divider()
-        st.markdown("#### Assignment Brief & Document Upload")
+        st.markdown("#### Assignment Briefs & Document Upload")
         
-        uploaded_file = st.file_uploader("Upload assignment document (TXT, PDF, DOCX)", type=["txt", "pdf", "docx"], key=f"brief_upload_{selected_project_id}")
+        uploaded_files = st.file_uploader("Upload assignment documents (TXT, PDF, DOCX)", type=["txt", "pdf", "docx"], accept_multiple_files=True, key=f"brief_upload_{selected_project_id}")
 
-        if uploaded_file is not None:
-            if st.button("Save assignment document", type="primary", key=f"save_doc_{selected_project_id}"):
-                document_text = extract_document(uploaded_file)
+        if uploaded_files:
+            if st.button("Save assignment documents", type="primary", key=f"save_doc_{selected_project_id}"):
+                document_text = extract_documents(uploaded_files)
                 if not document_text.strip():
-                    st.warning("No readable text found in the file.")
+                    st.warning("No readable text found in the files.")
                 else:
                     with get_db() as conn:
                         conn.execute("UPDATE projects SET document_text = ? WHERE id = ?", (document_text, selected_project_id))
-                    st.success("Assignment document saved.")
+                    st.success("Assignment documents saved.")
                     st.rerun()
 
         project = get_project(selected_project_id)
         if project["document_text"]:
-            st.success("Assignment document loaded.")
+            st.success("Assignment documents loaded.")
             with st.expander("Preview document text"):
-                st.text(project["document_text"][:3000])
+                st.text(project["document_text"][:5000])
 
             if not project["tasks_generated"]:
                 if st.button("Generate AI Task Suggestions", type="primary", key=f"gen_tasks_{selected_project_id}"):
@@ -662,7 +686,7 @@ else:
         m3.metric("Completed", done)
 
         if not tasks:
-            st.info("No tasks yet. Upload a brief and click generate, or add tasks below.")
+            st.info("No tasks yet. Upload briefs and click generate, or add tasks below.")
         else:
             for task in tasks:
                 with st.container(border=True):
