@@ -89,6 +89,9 @@ def generate_plan(brief, rubric, comments, members):
         content = content.split("\n", 1)[1]
         content = content.rsplit("```", 1)[0].strip()
 
+    print("AI RESPONSE:")
+    print(repr(content[:2000]))
+    
     result = json.loads(content)
 
     if not isinstance(result, dict):
