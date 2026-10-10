@@ -219,4 +219,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+
 app.db
+
+taskmanager.db
+*.db-journal
+*.db-wal
+*.db-shm
+assignment.pdf
+*.db
+

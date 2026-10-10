@@ -12,6 +12,8 @@ from docx import Document
 from db import has_active_plan
 from payments import show_paywall
 
+from ai_service import generate_plan
+
 
 # ============================================================
 # CONFIGURATION
@@ -144,6 +146,23 @@ st.markdown(
         background-color: #F3E8FF !important;
         color: #1E1B4B !important;
         border: 1.5px solid #7C3AED !important;
+    }
+
+    /* Force uploaded file pill / tag items to have a white background and black text */
+    [data-testid="stFileUploader"] [data-baseweb="tag"],
+    [data-testid="stFileUploader"] [data-testid="stUploadedFile"],
+    div[data-baseweb="tag"] {
+        background-color: #FFFFFF !important;
+        border: 1.5px solid #000000 !important;
+        border-radius: 8px !important;
+        color: #000000 !important;
+    }
+
+    [data-testid="stFileUploader"] [data-baseweb="tag"] *,
+    [data-testid="stFileUploader"] [data-testid="stUploadedFile"] *,
+    div[data-baseweb="tag"] * {
+        color: #000000 !important;
+        -webkit-text-fill-color: #000000 !important;
     }
 
     div[data-testid="stTextInput"] input::placeholder,
@@ -344,7 +363,7 @@ def add_member(project_id, name, email):
 # DOCUMENT EXTRACTION & AI SUGGESTIONS
 # ============================================================
 
-def extract_document(uploaded_file):
+def extract_single_document(uploaded_file):
     filename = uploaded_file.name.lower()
     try:
         if filename.endswith(".txt"):
@@ -359,11 +378,18 @@ def extract_document(uploaded_file):
                 for row in table.rows:
                     paragraphs.append(" | ".join(cell.text for cell in row.cells))
             return "\n".join(paragraphs)
-        st.error("Upload a TXT, PDF, or DOCX file.")
         return ""
     except Exception as exc:
-        st.error(f"Could not read the document: {exc}")
-        return ""
+        return f"[Error reading {uploaded_file.name}: {exc}]"
+
+
+def extract_documents(uploaded_files):
+    texts = []
+    for f in uploaded_files:
+        text = extract_single_document(f)
+        if text.strip():
+            texts.append(f"--- File: {f.name} ---\n" + text)
+    return "\n\n".join(texts)
 
 
 def suggest_tasks(document_text):
@@ -404,22 +430,18 @@ def suggest_tasks(document_text):
     return tasks
 
 
-def generate_project_tasks(project_id):
-    project = get_project(project_id)
-    if not project:
-        return
-    suggestions = suggest_tasks(project["document_text"] or "")
-    with get_db() as conn:
-        existing = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", (project_id,)).fetchone()["n"]
-        if existing > 0:
-            return
-        for title, description in suggestions:
-            conn.execute(
-                "INSERT INTO tasks (project_id, title, description, status, created_at) VALUES (?, ?, ?, 'To do', ?)",
-                (project_id, title, description, datetime.utcnow().isoformat()),
-            )
-        conn.execute("UPDATE projects SET tasks_generated = 1 WHERE id = ?", (project_id,))
+def generate_project_tasks(document_text, project_id):
+    members = get_members(project_id)
+    member_names = [member["name"] for member in members]
 
+    result = generate_plan(
+        brief=document_text,
+        rubric="",
+        comments="",
+        members=member_names
+    )
+
+    return result
 
 # ============================================================
 # APP FLOW & UI
@@ -595,7 +617,7 @@ else:
         st.caption(f"Invite Code: **{project['invite_code']}** · {member_count} member(s) joined")
 
         invite_url = "http://localhost:8501?" + urlencode({"invite": project["invite_code"]})
-        st.markdown("**Shareable Invite Link**")
+        st.markdown("**Shareable Invite Link (Click box to copy)**")
         
         st.components.v1.html(f"""
             <div onclick="copyLink()" style="
@@ -634,33 +656,110 @@ else:
             st.write(f"• **{member['name']}** ({member['email']})")
 
         st.divider()
-        st.markdown("#### Assignment Brief & Document Upload")
+        st.markdown("#### Assignment Briefs & Document Upload")
         
-        uploaded_file = st.file_uploader("Upload assignment document (TXT, PDF, DOCX)", type=["txt", "pdf", "docx"], key=f"brief_upload_{selected_project_id}")
+        uploaded_files = st.file_uploader("Upload assignment documents (TXT, PDF, DOCX)", type=["txt", "pdf", "docx"], accept_multiple_files=True, key=f"brief_upload_{selected_project_id}")
 
-        if uploaded_file is not None:
-            if st.button("Save assignment document", type="primary", key=f"save_doc_{selected_project_id}"):
-                document_text = extract_document(uploaded_file)
+        if uploaded_files:
+            if st.button("Save assignment documents", type="primary", key=f"save_doc_{selected_project_id}"):
+                document_text = extract_documents(uploaded_files)
                 if not document_text.strip():
-                    st.warning("No readable text found in the file.")
+                    st.warning("No readable text found in the files.")
                 else:
-                    with get_db() as conn:
-                        conn.execute("UPDATE projects SET document_text = ? WHERE id = ?", (document_text, selected_project_id))
-                    st.success("Assignment document saved.")
+                    st.session_state[f"document_{selected_project_id}"] = document_text
+                    st.success("Assignment documents loaded.")
                     st.rerun()
 
-        project = get_project(selected_project_id)
-        if project["document_text"]:
-            st.success("Assignment document loaded.")
+        document_text = st.session_state.get(
+            f"document_{selected_project_id}", ""
+        )
+
+        if document_text:
+            st.success("Assignment documents loaded.")
+
             with st.expander("Preview document text"):
-                st.text(project["document_text"][:3000])
+                st.text(document_text[:5000])
 
-            if not project["tasks_generated"]:
-                if st.button("Generate AI Task Suggestions", type="primary", key=f"gen_tasks_{selected_project_id}"):
-                    generate_project_tasks(selected_project_id)
-                    st.success("Tasks generated successfully.")
-                    st.rerun()
+            if st.button(
+                "Generate AI Task Suggestions",
+                type="primary",
+                key=f"gen_tasks_{selected_project_id}"
+            ):
+                existing_tasks = get_tasks(selected_project_id)
 
+                if existing_tasks:
+                    st.warning(
+                        "This project already has tasks. Review the existing task board before generating more."
+                    )
+                else:
+                    with st.spinner("AI is generating tasks..."):
+                        try:
+                            result = generate_project_tasks(
+                                document_text,
+                                selected_project_id
+                            )
+
+                            st.session_state[
+                                f"ai_tasks_{selected_project_id}"
+                            ] = result
+
+                        except Exception as e:
+                            st.error(f"AI generation failed: {e}")
+
+        # Display AI-generated tasks for review
+        ai_key = f"ai_tasks_{selected_project_id}"
+
+        if ai_key in st.session_state:
+            result = st.session_state[ai_key]
+            tasks = result.get("tasks", [])
+
+            st.subheader("Review AI Task Suggestions")
+
+            for i, task in enumerate(tasks):
+                with st.expander(f"{i + 1}. {task.get('title', 'Untitled task')}"):
+                    st.write(task.get("description", ""))
+
+                    st.write("**Marking criterion:**", task.get("criterion", ""))
+                    st.write("**Suggested member:**", task.get("suggested_member", ""))
+                    st.write("**Estimated effort:**", task.get("estimated_effort", ""))
+
+                    if task.get("source_verified"):
+                        st.success("Source quote verified")
+                    else:
+                        st.warning("Source quote could not be verified")
+
+                    st.caption(task.get("source_quote", ""))
+
+            if tasks and st.button(
+                "Approve and Add Tasks",
+                type="primary",
+                key=f"approve_ai_{selected_project_id}"
+            ):
+                with get_db() as conn:
+                    for task in tasks:
+                        conn.execute(
+                            """
+                            INSERT INTO tasks
+                            (project_id, title, description, status, created_at)
+                            VALUES (?, ?, ?, 'To do', ?)
+                            """,
+                            (
+                                selected_project_id,
+                                task.get("title", "Untitled task"),
+                                task.get("description", ""),
+                                datetime.utcnow().isoformat()
+                            )
+                        )
+
+                    conn.execute(
+                        "UPDATE projects SET tasks_generated = 1 WHERE id = ?",
+                        (selected_project_id,)
+                    )
+
+                del st.session_state[ai_key]
+                st.success("Approved tasks added to the board!")
+                st.rerun()
+        
         st.divider()
         st.markdown("#### Collaborative Task Board")
 
@@ -675,7 +774,7 @@ else:
         m3.metric("Completed", done)
 
         if not tasks:
-            st.info("No tasks yet. Upload a brief and click generate, or add tasks below.")
+            st.info("No tasks yet. Upload briefs and click generate, or add tasks below.")
         else:
             for task in tasks:
                 with st.container(border=True):
